@@ -1,0 +1,4 @@
+.vscode/
+*.bin
+*.cue
+*.exe
