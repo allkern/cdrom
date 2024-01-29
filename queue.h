@@ -18,5 +18,9 @@ uint8_t queue_peek(queue_t* queue);
 int queue_is_empty(queue_t* queue);
 int queue_is_full(queue_t* queue);
 void queue_reset(queue_t* queue);
+void queue_clear(queue_t* queue);
+int queue_size(queue_t* queue);
+int queue_max_size(queue_t* queue);
+void queue_destroy(queue_t* queue);
 
 #endif

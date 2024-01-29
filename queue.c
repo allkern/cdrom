@@ -47,3 +47,23 @@ void queue_reset(queue_t* queue) {
     queue->write_index = 0;
     queue->read_index = 0;
 }
+
+void queue_clear(queue_t* queue) {
+    for (int i = 0; i < queue->write_index; i++)
+        queue->buf[i] = 0;
+
+    queue_reset(queue);
+}
+
+int queue_size(queue_t* queue) {
+    return queue->write_index - queue->read_index;
+}
+
+int queue_max_size(queue_t* queue) {
+    return queue->size;
+}
+
+void queue_destroy(queue_t* queue) {
+    free(queue->buf);
+    free(queue);
+}

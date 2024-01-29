@@ -1,6 +1,8 @@
+#include <stdlib.h>
 #include <stdio.h>
 
 #include "cue.h"
+#include "queue.h"
 
 static const char* m_cue_keywords[] = {
     "4CH",
@@ -36,36 +38,21 @@ static const char* m_cue_keywords[] = {
     0
 };
 
+#define MSF_TO_LBA(m, s, f) ((m * 4500) + (s * 75) + f)
+
 int main(int argc, const char* argv[]) {
     cue_t* cue = cue_create();
-    cue_init(cue, FM_FILE);
+    cue_init(cue);
     cue_parse(cue, argv[1]);
 
     printf("Parsed CUE file \'%s\'. Track count: %llu\n",
         argv[1],
-        cue->tracks->size,
-        cue->files->size
+        cue->tracks->size
     );
 
-    printf("Tracks:\n");
+    cue_load(cue, LD_BUFFERED);
 
-    // node_t* track = list_front(cue->tracks);
-
-    // while (track) {
-    //     cue_track_t* ct = track->data;
-
-    //     printf("    track %u: mode=%s [0]=%u [1]=%u in \'%s\'\n",
-    //         ct->number,
-    //         m_cue_keywords[ct->mode],
-    //         ct->index[0],
-    //         ct->index[1],
-    //         ct->file->name
-    //     );
-
-    //     track = track->next;
-    // }
-
-    cue_load(cue);
+    printf("Loaded CUE image\n");
 
     node_t* track = list_front(cue->tracks);
 
@@ -84,7 +71,29 @@ int main(int argc, const char* argv[]) {
         track = track->next;
     }
 
+    uint8_t* buf = malloc(2352);
+
+    int lba = MSF_TO_LBA(0, 2, 0);
+
+    cue_read(cue, lba, buf);
+
+    for (int y = 0; y < 0x10; y++) {
+        printf("%08x: ", ((lba - 150) * 0x930) + (y << 4));
+
+        for (int x = 0; x < 0x10; x++) {
+            printf("%02x ", buf[x + (y * 0x10)]);
+        }
+
+        printf("\n");
+    }
+
+    free(buf);
+
+    printf("Destroying CUE... ");
+
     cue_destroy(cue);
+
+    printf("done\n");
 
     return 0;
 }

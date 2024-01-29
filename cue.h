@@ -2,6 +2,7 @@
 #define CUE_H
 
 #include "list.h"
+#include "disc.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -42,15 +43,16 @@ enum {
 };
 
 enum {
-    FM_BUFFERED,
-    FM_FILE
+    LD_BUFFERED,
+    LD_FILE
 };
 
 typedef struct {
     char* name;
-    int mode;
+    int buf_mode;
     void* buf;
     size_t size;
+    uint32_t start;
     list_t* tracks;
 } cue_file_t;
 
@@ -71,14 +73,15 @@ typedef struct {
     list_t* tracks;
 
     char c;
-    int mode;
     FILE* file;
 } cue_t;
 
 cue_t* cue_create(void);
-void cue_init(cue_t* cue, int mode);
+void cue_init(cue_t* cue);
 int cue_parse(cue_t* cue, const char* path);
-void cue_load(cue_t* cue);
+void cue_load(cue_t* cue, int mode);
+int cue_read(cue_t* cue, uint32_t lba, void* buf);
+void cue_init_disc(cue_t* cue, psx_disc_t* disc);
 void cue_destroy(cue_t* cue);
 
 #endif

@@ -169,7 +169,6 @@ cue_file_t* cue_parse_file(cue_t* cue) {
 
     cue_file_t* file = malloc(sizeof(cue_file_t));
 
-    file->mode = cue->mode;
     file->tracks = list_create();
     file->name = malloc(512);
 
@@ -201,11 +200,9 @@ cue_t* cue_create(void) {
     return malloc(sizeof(cue_t));
 }
 
-void cue_init(cue_t* cue, int mode) {
+void cue_init(cue_t* cue) {
     cue->files = list_create();
     cue->tracks = list_create();
-
-    cue->mode = mode;
 }
 
 int cue_parse(cue_t* cue, const char* path) {
@@ -263,13 +260,23 @@ size_t get_file_size(FILE* file) {
     return size;
 }
 
-void cue_init_tracks(cue_file_t* file, uint32_t lba) {
+uint32_t init_tracks(cue_file_t* file, uint32_t lba) {
     node_t* node = list_front(file->tracks);
+
+    // if (file->tracks->size == 1) {
+    //     cue_track_t* data = node->data;
+
+    //     data->pregap = data->index[1] - data->index[0];
+    //     data->start = 
+    //     data->end = lba + (file->size / 0x930);
+    // }
+
+    uint32_t pregap = 0;
 
     while (node) {
         cue_track_t* data = node->data;
 
-        if (!data->pregap)
+        if ((file->tracks->size == 1) && !data->pregap)
             data->pregap = data->index[1] - data->index[0];
 
         data->start = lba + data->index[1];
@@ -279,14 +286,22 @@ void cue_init_tracks(cue_file_t* file, uint32_t lba) {
 
             data->end = lba + next->index[1];
         } else {
-            data->end = lba + (file->size / 0x930);
+            if (file->tracks->size == 1) {
+                data->end = lba + data->index[1] + (file->size / 0x930);
+            } else {
+                data->end = lba + (file->size / 0x930);
+            }
         }
+
+        pregap += data->pregap;
 
         node = node->next;
     }
+
+    return pregap;
 }
 
-void cue_load(cue_t* cue) {
+void cue_load(cue_t* cue, int mode) {
     node_t* node = list_front(cue->files);
 
     // 00:02:00
@@ -303,15 +318,16 @@ void cue_load(cue_t* cue) {
             exit(1);
         }
 
+        data->buf_mode = mode;
         data->size = get_file_size(file);
 
-        printf("Loaded %s: size=%llx, sectors=%llu\n",
+        printf("Loaded \'%s\': size=%llx, sectors=%llu\n",
             data->name,
             data->size,
             data->size / 0x930
         );
 
-        if (data->mode == FM_BUFFERED) {
+        if (data->buf_mode == LD_BUFFERED) {
             data->buf = malloc(data->size);
 
             fseek(file, 0, SEEK_SET);
@@ -322,7 +338,7 @@ void cue_load(cue_t* cue) {
             data->buf = file;
         }
 
-        cue_init_tracks(data, lba);
+        data->start = lba + init_tracks(data, lba);
 
         lba += data->size / 0x930;
 
@@ -331,8 +347,91 @@ void cue_load(cue_t* cue) {
 }
 
 void cue_destroy(cue_t* cue) {
+    node_t* node = list_front(cue->files);
+
+    while (node) {
+        cue_file_t* file = node->data;
+
+        if (file->buf_mode == LD_BUFFERED) {
+            free(file->buf);
+        } else {
+            fclose((FILE*)file->buf);
+        }
+
+        list_destroy(file->tracks);
+
+        free(file->name);
+        free(file);
+
+        node = node->next;
+    }
+
     list_destroy(cue->files);
+
+    node = list_front(cue->tracks);
+
+    while (node) {
+        free(node->data);
+
+        node = node->next;
+    }
+
     list_destroy(cue->tracks);
 
     free(cue);
+}
+
+cue_track_t* get_sector_track(cue_t* cue, uint32_t lba) {
+    node_t* node = list_front(cue->tracks);
+
+    while (node) {
+        cue_track_t* track = node->data;
+
+        if ((lba >= track->start) && (lba < track->end))
+            return track;
+
+        node = node->next;
+    }
+
+    return NULL;
+}
+
+int cue_read(cue_t* cue, uint32_t lba, void* buf) {
+    if (lba >= ((cue_track_t*)list_back(cue->tracks)->data)->end)
+        return TS_FAR;
+
+    cue_track_t* track = get_sector_track(cue, lba);
+
+    // If the LBA isn't too far but the track wasn't found
+    // then we are being requested a pregap sector. Clear buffer
+    // and initialize sync data (not actually needed)
+    if (!track) {
+        memset(buf, 0, 2352);
+        memset(buf + 1, 255, 10);
+
+        return TS_PREGAP;
+    }
+
+    cue_file_t* file = track->file;
+
+    printf("Reading sector %u at track %u, file=%s (%u), offset=%u (%08x)\n",
+        lba,
+        track->number,
+        track->file->name,
+        file->start,
+        lba - file->start,
+        (lba - file->start) * 2352
+    );
+
+    if (file->buf_mode == LD_BUFFERED) {
+        uint8_t* ptr = file->buf + ((lba - file->start) * 2352);
+
+        memcpy(buf, ptr, 2352);
+    } else {
+        fseek(file->buf, (lba - file->start) * 2352, SEEK_SET);
+
+        fread(buf, 1, 2352, file->buf);
+    }
+
+    return (track->mode == CUE_MODE2_2352) ? TS_DATA : TS_AUDIO;
 }
