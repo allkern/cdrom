@@ -40,11 +40,17 @@ enum {
 
 #define CD_SECTOR_SIZE 2352
 
-typedef int (*read_func)(void*, uint32_t, void*);
+typedef void (*read_sector_func)(void*, uint32_t, void*);
+typedef int (*query_sector_func)(void*, uint32_t);
+typedef int (*get_track_count_func)(void*);
+typedef uint32_t (*get_track_lba_func)(void*, int);
 
 typedef struct {
-    read_func read;
     void* udata;
+    read_sector_func read_sector;
+    query_sector_func query_sector;
+    get_track_count_func get_track_count;
+    get_track_lba_func get_track_lba;
 } psx_disc_t;
 
 psx_disc_t* psx_disc_create(void);

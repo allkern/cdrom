@@ -15,11 +15,11 @@
     Stop (when stopped)    0001d7bh  0001ce8h..0001eefh
 */
 
-#define DELAY_1MS 33869
-#define DELAY_PAUSE_SS 2168860
-#define DELAY_PAUSE_DS 1097107
-#define DELAY_STOP_SS 13863626
-#define DELAY_STOP_DS 25845878
+#define CD_DELAY_1MS 33869
+#define CD_DELAY_PAUSE_SS 2168860
+#define CD_DELAY_PAUSE_DS 1097107
+#define CD_DELAY_STOP_SS 13863626
+#define CD_DELAY_STOP_DS 25845878
 
 /*
     7   Speed       (0=Normal speed, 1=Double speed)
@@ -159,17 +159,34 @@
 #define CD_STAT_SPINDLE     0x02
 #define CD_STAT_ERROR       0x01
 
-#define SET_INT(n) cdrom->ifr = n;
+// #define SET_INT(n) cdrom->ifr = n;
 
 enum {
     CD_STATE_IDLE,
-    CD_STATE_PROCESSING_COMMAND,
-    CD_STATE_EXECUTING_COMMAND,
-    CD_STATE_READ
+    CD_STATE_TX_RESP1,
+    CD_STATE_TX_RESP2,
+    CD_STATE_READ,
+    CD_STATE_PLAY
 };
 
+enum {
+    QUERY_TRACK_COUNT,
+    QUERY_TRACK_ADDR,
+    QUERY_TRACK_TYPE
+};
+
+typedef void (*read_sector_func)(void*, uint32_t, void*);
+typedef int (*query_sector_func)(void*, uint32_t);
+typedef int (*get_track_count_func)(void*);
+typedef uint32_t (*get_track_lba_func)(void*, int);
+
 typedef struct {
-    psx_disc_t* disc;
+    void* disc_udata;
+    read_sector_func disc_read_sector;
+    query_sector_func disc_query_sector;
+    get_track_count_func disc_get_track_count;
+    get_track_lba_func disc_get_track_lba;
+
     int index;
     uint8_t ier;
     uint8_t ifr;
@@ -186,7 +203,9 @@ typedef struct {
     int int1_pending;
     int int2_pending;
     int delay;
-    uint32_t pending_setloc;
+    uint32_t lba;
+    uint32_t cdda_lba;
+    uint32_t xa_lba;
 } psx_cdrom_t;
 
 typedef void (*cdrom_write_func)(psx_cdrom_t*, uint8_t);

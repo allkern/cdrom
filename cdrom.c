@@ -1,6 +1,7 @@
 #include <string.h>
 #include <assert.h>
-#include <stdarg.h>
+#include <stdlib.h>
+#include <stdio.h>
 
 #include "cdrom.h"
 
@@ -41,6 +42,8 @@ static const uint8_t btoi_table[] = {
     0x9e, 0x9f, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5,
 };
 
+typedef void (*cdrom_cmd_func)(psx_cdrom_t* cdrom);
+
 void cdrom_cmd_getstat(psx_cdrom_t* cdrom);
 void cdrom_cmd_setloc(psx_cdrom_t* cdrom);
 void cdrom_cmd_play(psx_cdrom_t* cdrom);
@@ -71,6 +74,41 @@ void cdrom_cmd_getq(psx_cdrom_t* cdrom);
 void cdrom_cmd_readtoc(psx_cdrom_t* cdrom);
 void cdrom_cmd_videocd(psx_cdrom_t* cdrom);
 
+cdrom_cmd_func cdrom_cmd_table[] = {
+    (cdrom_cmd_func)0,
+    cdrom_cmd_getstat,
+    cdrom_cmd_setloc,
+    cdrom_cmd_play,
+    cdrom_cmd_forward,
+    cdrom_cmd_backward,
+    cdrom_cmd_readn,
+    cdrom_cmd_motoron,
+    cdrom_cmd_stop,
+    cdrom_cmd_pause,
+    cdrom_cmd_init,
+    cdrom_cmd_mute,
+    cdrom_cmd_demute,
+    cdrom_cmd_setfilter,
+    cdrom_cmd_setmode,
+    cdrom_cmd_getparam,
+    cdrom_cmd_getlocl,
+    cdrom_cmd_getlocp,
+    cdrom_cmd_setsession,
+    cdrom_cmd_gettn,
+    cdrom_cmd_gettd,
+    cdrom_cmd_seekl,
+    cdrom_cmd_seekp,
+    (cdrom_cmd_func)0,
+    (cdrom_cmd_func)0,
+    cdrom_cmd_test,
+    cdrom_cmd_getid,
+    cdrom_cmd_reads,
+    cdrom_cmd_reset,
+    cdrom_cmd_getq,
+    cdrom_cmd_readtoc,
+    cdrom_cmd_videocd
+};
+
 void cdrom_write_stat(psx_cdrom_t* cdrom, uint8_t data);
 void cdrom_write_cmd(psx_cdrom_t* cdrom, uint8_t data);
 void cdrom_write_null(psx_cdrom_t* cdrom, uint8_t data);
@@ -84,12 +122,12 @@ void cdrom_write_vol2(psx_cdrom_t* cdrom, uint8_t data);
 void cdrom_write_vol3(psx_cdrom_t* cdrom, uint8_t data);
 void cdrom_write_vapp(psx_cdrom_t* cdrom, uint8_t data);
 
-cdrom_write_func cdrom_write_table[] = {
-    cdrom_write_stat, cdrom_write_cmd , cdrom_write_parm, cdrom_write_req ,
-    cdrom_write_stat, cdrom_write_null, cdrom_write_ier , cdrom_write_ifr ,
-    cdrom_write_stat, cdrom_write_null, cdrom_write_vol0, cdrom_write_vol1,
-    cdrom_write_stat, cdrom_write_vol2, cdrom_write_vol3, cdrom_write_vapp
-};
+// cdrom_write_func cdrom_write_table[] = {
+//     cdrom_write_stat, cdrom_write_cmd , cdrom_write_parm, cdrom_write_req ,
+//     cdrom_write_stat, cdrom_write_null, cdrom_write_ier , cdrom_write_ifr ,
+//     cdrom_write_stat, cdrom_write_null, cdrom_write_vol0, cdrom_write_vol1,
+//     cdrom_write_stat, cdrom_write_vol2, cdrom_write_vol3, cdrom_write_vapp
+// };
 
 psx_cdrom_t* psx_cdrom_create(void) {
     return malloc(sizeof(psx_cdrom_t));
@@ -116,12 +154,17 @@ void cdrom_error(psx_cdrom_t* cdrom, uint8_t stat, uint8_t err) {
 
     queue_push(cdrom->response, CD_STAT_ERROR | stat);
     queue_push(cdrom->response, err);
+
+    cdrom->state = CD_STATE_IDLE;
+    cdrom->pending_command = 0;
 }
 
-void cdrom_handle_first_response(psx_cdrom_t* cdrom) {
+void cdrom_handle_resp1(psx_cdrom_t* cdrom) {
+    cdrom->busy = 0;
+
     // Check for no disc
     // i.e. INT5(11h, 80h)
-    if (!cdrom->disc) {
+    if (!cdrom->disc_udata) {
         cdrom_error(cdrom, CD_STAT_SHELLOPEN, CD_ERR_NO_DISC);
 
         return;
@@ -244,35 +287,39 @@ void cdrom_handle_first_response(psx_cdrom_t* cdrom) {
     }
 
     // If everything is alright (i.e. disc present, valid command,
-    // correct number of parameters) then send INT3(stat)
-    cdrom_set_int(cdrom, 3);
-
-    queue_push(cdrom->response, CD_STAT_SPINDLE);
-
-    // Check for commands that send second responses
-    switch (cdrom->pending_command) {
-        case CDL_STOP:
-        case CDL_MOTORON:
-        case CDL_PAUSE:
-    }
-
-    cdrom->state = CD_STATE_IDLE;
+    // correct number of parameters) then send "execute command"
+    cdrom_cmd_table[cdrom->pending_command](cdrom);
 }
 
 void psx_cdrom_update(psx_cdrom_t* cdrom, int cycles) {
     if (cdrom->delay > 0) {
         cdrom->delay -= cycles;
 
-        return;
+        if (cdrom->delay > 0)
+            return;
     }
+
+    cdrom->delay = 0;
 
     if (cdrom->state == CD_STATE_IDLE)
         return;
 
-    if (cdrom->state == CD_STATE_PROCESSING_COMMAND) {
-        cdrom_handle_first_response(cdrom);
+    if (cdrom->state == CD_STATE_TX_RESP1) {
+        cdrom_handle_resp1(cdrom);
 
         return;
+    }
+
+    if (cdrom->state == CD_STATE_TX_RESP2) {
+        cdrom_cmd_table[cdrom->pending_command](cdrom);
+    
+        return;
+    }
+
+    if (cdrom->state == CD_STATE_READ) {
+        cdrom_set_int(cdrom, 1);
+
+        memset(cdrom->data->buf, 0, CD_SECTOR_SIZE);
     }
 }
 
@@ -294,15 +341,32 @@ uint8_t cdrom_read_data(psx_cdrom_t* cdrom) {
 }
 
 uint32_t psx_cdrom_read8(psx_cdrom_t* cdrom, uint32_t addr) {
-    switch (cdrom->index) {
+    switch (addr) {
         case 0: return cdrom_read_status(cdrom);
         case 1: return queue_pop(cdrom->response);
         case 2: return cdrom_read_data(cdrom);
-        case 3: return (addr & 1) ? (cdrom->ifr | 0xe0) : cdrom->ier;
+        case 3: return (cdrom->index & 1) ? (0xe0 | cdrom->ifr) : cdrom->ier;
     }
 }
 void psx_cdrom_write8(psx_cdrom_t* cdrom, uint32_t addr, uint32_t value) {
-    cdrom_write_table[(cdrom->index << 2) | addr](cdrom, value);
+    switch ((cdrom->index << 2) | addr) {
+        case 0: cdrom_write_stat(cdrom, value); break;
+        case 1: cdrom_write_cmd(cdrom, value); break;
+        case 2: cdrom_write_parm(cdrom, value); break;
+        case 3: cdrom_write_req(cdrom, value); break;
+        case 4: cdrom_write_stat(cdrom, value); break;
+        case 5: cdrom_write_null(cdrom, value); break;
+        case 6: cdrom_write_ier(cdrom, value); break;
+        case 7: cdrom_write_ifr(cdrom, value); break;
+        case 8: cdrom_write_stat(cdrom, value); break;
+        case 9: cdrom_write_null(cdrom, value); break;
+        case 10: cdrom_write_vol0(cdrom, value); break;
+        case 11: cdrom_write_vol1(cdrom, value); break;
+        case 12: cdrom_write_stat(cdrom, value); break;
+        case 13: cdrom_write_vol2(cdrom, value); break;
+        case 14: cdrom_write_vol3(cdrom, value); break;
+        case 15: cdrom_write_vapp(cdrom, value); break;
+    }
 }
 
 void psx_cdrom_destroy(psx_cdrom_t* cdrom);
@@ -314,23 +378,14 @@ void cdrom_write_stat(psx_cdrom_t* cdrom, uint8_t data) {
 void cdrom_write_cmd(psx_cdrom_t* cdrom, uint8_t data) {
     if (cdrom->state == CD_STATE_IDLE) {
         cdrom->pending_command = data;
-        cdrom->state = CD_STATE_PROCESSING_COMMAND;
+        cdrom->state = CD_STATE_TX_RESP1;
 
-        // Init takes a little bit longer to process
+        // To-do: Init takes a little bit longer to process
         // i.e. INT3 arrives 1ms late
-        if (data == CDL_INIT) {
-            cdrom->delay = DELAY_1MS * 2;
-        } else {
-            cdrom->delay = DELAY_1MS;
-        }
-
+        cdrom->delay = CD_DELAY_1MS;
         cdrom->busy = 1;
 
         return;
-    }
-
-    if (cdrom->state == CD_STATE_PROCESSING_COMMAND) {
-
     }
 }
 
@@ -414,7 +469,9 @@ void psx_cdrom_write16(psx_cdrom_t* cdrom, uint32_t addr, uint32_t value) {
 // +----------------------+
 
 void cdrom_cmd_getstat(psx_cdrom_t* cdrom) {
+    cdrom_set_int(cdrom, 3);
 
+    queue_push(cdrom->response, CD_STAT_SPINDLE);
 }
 
 void cdrom_cmd_setloc(psx_cdrom_t* cdrom) {
@@ -423,12 +480,18 @@ void cdrom_cmd_setloc(psx_cdrom_t* cdrom) {
     int f = queue_pop(cdrom->parameters);
 
     if (!VALID_MSF(m, s, f)) {
-        // Error: Invalid MSF
+        cdrom_error(cdrom, CD_STAT_SPINDLE, CD_ERR_INVALID_SUBFUNCTION);
 
         return;
     }
 
-    cdrom->pending_setloc = (BTOI(m) * 4500) + (BTOI(s) * 75) + BTOI(f);
+    cdrom->lba = (BTOI(m) * 4500) + (BTOI(s) * 75) + BTOI(f);
+
+    cdrom_set_int(cdrom, 3);
+
+    queue_push(cdrom->response, CD_STAT_SPINDLE);
+
+    cdrom->state = CD_STATE_IDLE;
 }
 
 void cdrom_cmd_play(psx_cdrom_t* cdrom) {
@@ -444,7 +507,12 @@ void cdrom_cmd_backward(psx_cdrom_t* cdrom) {
 }
 
 void cdrom_cmd_readn(psx_cdrom_t* cdrom) {
+    cdrom_set_int(cdrom, 3);
 
+    queue_push(cdrom->response, CD_STAT_SPINDLE);
+
+    cdrom->state = CD_STATE_READ;
+    cdrom->delay = CD_DELAY_1MS;
 }
 
 void cdrom_cmd_motoron(psx_cdrom_t* cdrom) {
@@ -460,7 +528,24 @@ void cdrom_cmd_pause(psx_cdrom_t* cdrom) {
 }
 
 void cdrom_cmd_init(psx_cdrom_t* cdrom) {
+    // Init sends the "same" thing twice. On real hardware 
+    // it would probably send something different, but that's
+    // not really important.
+    if (cdrom->state == CD_STATE_TX_RESP1) {
+        cdrom_set_int(cdrom, 3);
 
+        queue_push(cdrom->response, CD_STAT_SPINDLE);
+
+        cdrom->delay = CD_DELAY_1MS;
+        cdrom->state = CD_STATE_TX_RESP2;
+    } else {
+        cdrom_set_int(cdrom, 2);
+
+        queue_push(cdrom->response, CD_STAT_SPINDLE);
+
+        cdrom->state = CD_STATE_IDLE;
+        cdrom->pending_command = 0;
+    }
 }
 
 void cdrom_cmd_mute(psx_cdrom_t* cdrom) {
@@ -512,11 +597,83 @@ void cdrom_cmd_seekp(psx_cdrom_t* cdrom) {
 }
 
 void cdrom_cmd_test(psx_cdrom_t* cdrom) {
+    int subf = queue_pop(cdrom->parameters);
 
+    // To-do: Handle other subfunctions (hard)
+    assert(subf == 32);
+
+    // To-do: Return correct date/version based on
+    //        BIOS data.
+    /*
+        (unknown)        ;DTL-H2000 (with SPC700 instead HC05)
+        94h,09h,19h,C0h  ;PSX (PU-7)               19 Sep 1994, version vC0 (a)
+        94h,11h,18h,C0h  ;PSX (PU-7)               18 Nov 1994, version vC0 (b)
+        95h,05h,16h,C1h  ;PSX (EARLY-PU-8)         16 May 1995, version vC1 (a)
+        95h,07h,24h,C1h  ;PSX (LATE-PU-8)          24 Jul 1995, version vC1 (b)
+        95h,07h,24h,D1h  ;PSX (LATE-PU-8,debug ver)24 Jul 1995, version vD1 (debug)
+        96h,08h,15h,C2h  ;PSX (PU-16, Video CD)    15 Aug 1996, version vC2 (VCD)
+        96h,08h,18h,C1h  ;PSX (LATE-PU-8,yaroze)   18 Aug 1996, version vC1 (yaroze)
+        96h,09h,12h,C2h  ;PSX (PU-18) (japan)      12 Sep 1996, version vC2 (a.jap)
+        97h,01h,10h,C2h  ;PSX (PU-18) (us/eur)     10 Jan 1997, version vC2 (a)
+        97h,08h,14h,C2h  ;PSX (PU-20)              14 Aug 1997, version vC2 (b)
+        98h,06h,10h,C3h  ;PSX (PU-22)              10 Jul 1998, version vC3 (a)
+        99h,02h,01h,C3h  ;PSX/PSone (PU-23, PM-41) 01 Feb 1999, version vC3 (b)
+        A1h,03h,06h,C3h  ;PSone/late (PM-41(2))    06 Jun 2001, version vC3 (c)
+        (unknown)        ;PS2,   xx xxx xxxx, late PS2 models...?
+    */
+
+    cdrom_set_int(cdrom, 3);
+
+    queue_push(cdrom->response, 0x94);
+    queue_push(cdrom->response, 0x09);
+    queue_push(cdrom->response, 0x19);
+    queue_push(cdrom->response, 0xc0);
+
+    cdrom->state = CD_STATE_IDLE;
+    cdrom->pending_command = 0;
 }
 
 void cdrom_cmd_getid(psx_cdrom_t* cdrom) {
+    /*
+        Drive Status           1st Response   2nd Response
+        Door Open              INT5(11h,80h)  N/A
+        Spin-up                INT5(01h,80h)  N/A
+        Detect busy            INT5(03h,80h)  N/A
+        No Disk                INT3(stat)     INT5(08h,40h, 00h,00h, 00h,00h,00h,00h)
+        Audio Disk             INT3(stat)     INT5(0Ah,90h, 00h,00h, 00h,00h,00h,00h)
+        Unlicensed:Mode1       INT3(stat)     INT5(0Ah,80h, 00h,00h, 00h,00h,00h,00h)
+        Unlicensed:Mode2       INT3(stat)     INT5(0Ah,80h, 20h,00h, 00h,00h,00h,00h)
+        Unlicensed:Mode2+Audio INT3(stat)     INT5(0Ah,90h, 20h,00h, 00h,00h,00h,00h)
+        Debug/Yaroze:Mode2     INT3(stat)     INT2(02h,00h, 20h,00h, 20h,20h,20h,20h)
+        Licensed:Mode2         INT3(stat)     INT2(02h,00h, 20h,00h, 53h,43h,45h,4xh)
+        Modchip:Audio/Mode1    INT3(stat)     INT2(02h,00h, 00h,00h, 53h,43h,45h,4xh)
+    */
+    
+    if (cdrom->state == CD_STATE_TX_RESP1) {
+        cdrom_set_int(cdrom, 3);
 
+        queue_push(cdrom->response, CD_STAT_SPINDLE);
+
+        cdrom->state = CD_STATE_TX_RESP2;
+        cdrom->delay = CD_DELAY_1MS;
+    } else {
+        // To-do: Set this based on detected CD type
+        cdrom_set_int(cdrom, 2);
+
+        queue_push(cdrom->response, 0x02);
+        queue_push(cdrom->response, 0x00);
+        queue_push(cdrom->response, 0x20);
+        queue_push(cdrom->response, 0x00);
+
+        // To-do: Set this based on console region
+        queue_push(cdrom->response, 'S');
+        queue_push(cdrom->response, 'C');
+        queue_push(cdrom->response, 'E');
+        queue_push(cdrom->response, 'A');
+
+        cdrom->state = CD_STATE_IDLE;
+        cdrom->pending_command = 0;
+    }
 }
 
 void cdrom_cmd_reads(psx_cdrom_t* cdrom) {
