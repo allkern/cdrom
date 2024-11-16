@@ -6,20 +6,44 @@
 #include "queue.h"
 #include "disc.h"
 
+#define PSX_CDROM_BEGIN 0x1f801800
+#define PSX_CDROM_END   0x1f801803
+#define PSX_CDROM_SIZE  0x4
+
 /*
+    Command                Average   Min       Max
+    GetStat (normal)       000c4e1h  0004a73h..003115bh
+    GetStat (when stopped) 0005cf4h  000483bh..00093f2h
     Pause (single speed)   021181ch  020eaefh..0216e3ch ;\time equal to
     Pause (double speed)   010bd93h  010477Ah..011B302h ;/about 5 sectors
     Pause (when paused)    0001df2h  0001d25h..0001f22h
     Stop (single speed)    0d38acah  0c3bc41h..0da554dh
     Stop (double speed)    18a6076h  184476bh..192b306h
     Stop (when stopped)    0001d7bh  0001ce8h..0001eefh
+    GetID                  0004a00h  0004922h..0004c2bh
+    Init                   0013cceh  000f820h..00xxxxxh
 */
 
 #define CD_DELAY_1MS 33869
+#define CD_DELAY_FR 50401
+#define CD_DELAY_INIT_FR 81102
 #define CD_DELAY_PAUSE_SS 2168860
 #define CD_DELAY_PAUSE_DS 1097107
 #define CD_DELAY_STOP_SS 13863626
 #define CD_DELAY_STOP_DS 25845878
+#define CD_DELAY_READ_SS (33868800 / 75)
+#define CD_DELAY_READ_DS (33868800 / (2*75))
+#define CD_DELAY_START_READ (cdrom_get_read_delay(cdrom) + cdrom_get_seek_delay(cdrom, ts))
+#define CD_DELAY_ONGOING_READ (cdrom_get_read_delay(cdrom) + (CD_DELAY_1MS * 4))
+
+#define XA_STEREO_SAMPLES 2016 // Samples per sector
+#define XA_MONO_SAMPLES 4032 // Samples per sector
+#define XA_STEREO_RESAMPLE_SIZE 2352 // 2352
+#define XA_MONO_RESAMPLE_SIZE 4704 // 4704
+#define XA_STEREO_RESAMPLE_MAX_SIZE 4704 // 2352 * 2 (because of 18KHz mode)
+#define XA_MONO_RESAMPLE_MAX_SIZE 9408 // 4704 * 2 (because of 18KHz mode)
+#define XA_UPSAMPLE_SIZE 28224 // 4032 * 7
+#define XA_RINGBUF_SIZE 32
 
 /*
     7   Speed       (0=Normal speed, 1=Double speed)
@@ -175,21 +199,24 @@ enum {
     QUERY_TRACK_TYPE
 };
 
-typedef void (*read_sector_func)(void*, uint32_t, void*);
-typedef int (*query_sector_func)(void*, uint32_t);
-typedef int (*get_track_count_func)(void*);
-typedef uint32_t (*get_track_lba_func)(void*, int);
 
 typedef struct {
-    void* disc_udata;
-    read_sector_func disc_read_sector;
-    query_sector_func disc_query_sector;
-    get_track_count_func disc_get_track_count;
-    get_track_lba_func disc_get_track_lba;
-
+    int mute;
+    uint32_t bus_delay;
+    uint32_t io_base, io_size;
+    psx_disc_t* disc;
+    void (*send_irq)(void*);
+    void* send_irq_udata;
+    int disc_type;
+    int version;
+    int region;
     int index;
+    int pending_speed_switch_delay;
+    int seek_precision;
+    int fake_getlocl_data;
     uint8_t ier;
     uint8_t ifr;
+    uint8_t vol_pending[4];
     uint8_t vol[4];
     uint8_t mode;
     int data_req;
@@ -198,21 +225,79 @@ typedef struct {
     queue_t* parameters;
     uint8_t pending_command;
     int busy;
+    uint32_t xa_lba;
     int xa_playing;
+    int xa_mute;
+    int xa_channel;
+    int xa_file;
+    int xa_remaining_samples;
+    int16_t xa_left_h[2];
+    int16_t xa_right_h[2];
+    int16_t xa_prev_left_sample;
+    int16_t xa_prev_right_sample;
+    int xa_sample_index;
     int state;
+    int prev_state;
     int int1_pending;
     int int2_pending;
     int delay;
+    uint32_t pending_lba;
     uint32_t lba;
-    uint32_t cdda_lba;
-    uint32_t xa_lba;
+    int16_t cdda_buf[CD_SECTOR_SIZE >> 1];
+    int32_t cdda_remaining_samples;
+    uint32_t cdda_sample_index;
+    uint32_t cdda_sectors_played;
+    int cdda_playing;
+    int cdda_prev_track;
+    int read_ongoing;
+    uint8_t xa_buf[CD_SECTOR_SIZE];
+    int16_t xa_left_buf[XA_STEREO_SAMPLES];
+    int16_t xa_right_buf[XA_STEREO_SAMPLES];
+    int16_t xa_mono_buf[XA_MONO_SAMPLES];
+    int16_t xa_upsample_buf[XA_UPSAMPLE_SIZE];
+    int16_t xa_left_resample_buf[XA_STEREO_RESAMPLE_MAX_SIZE];
+    int16_t xa_right_resample_buf[XA_STEREO_RESAMPLE_MAX_SIZE];
+    int16_t xa_mono_resample_buf[XA_MONO_RESAMPLE_MAX_SIZE];
 } psx_cdrom_t;
 
-typedef void (*cdrom_write_func)(psx_cdrom_t*, uint8_t);
-typedef uint8_t (*cdrom_read_func)(psx_cdrom_t*);
+enum {
+    CDR_VERSION_01,  // DTL-H2000                 (??-???-????)
+    CDR_VERSION_C0A, // PSX (PU-7)                (19-Sep-1994)
+    CDR_VERSION_C0B, // PSX (PU-7)                (18-Nov-1994)
+    CDR_VERSION_C1A, // PSX (EARLY-PU-8)          (16-May-1995)
+    CDR_VERSION_C1B, // PSX (LATE-PU-8)           (24-Jul-1995)
+    CDR_VERSION_D1,  // PSX (LATE-PU-8, Debug)    (24-Jul-1995)
+    CDR_VERSION_C2V, // PSX (PU-16, Video CD)     (15-Aug-1996)
+    CDR_VERSION_C1Y, // PSX (LATE-PU-8, Yaroze)   (18-Aug-1996)
+    CDR_VERSION_C2J, // PSX (PU-18) (J)           (12-Sep-1996)
+    CDR_VERSION_C2A, // PSX (PU-18) (U/E)         (10-Jan-1997)
+    CDR_VERSION_C2B, // PSX (PU-20)               (14-Aug-1997)
+    CDR_VERSION_C3A, // PSX (PU-22)               (10-Jul-1998)
+    CDR_VERSION_C3B, // PSX/PSone (PU-23, PM-41)  (01-Feb-1999)
+    CDR_VERSION_C3C  // PSone/late (PM-41(2))     (06-Jun-2001)
+};
+
+enum {
+    CDR_REGION_JAPAN,
+    CDR_REGION_EUROPE,
+    CDR_REGION_AMERICA
+};
+
+uint8_t cdrom_get_stat(psx_cdrom_t* cdrom);
+void cdrom_error(psx_cdrom_t* cdrom, uint8_t stat, uint8_t err);
+int cdrom_get_seek_delay(psx_cdrom_t* cdrom, int ts);
+int cdrom_get_pause_delay(psx_cdrom_t* cdrom);
+int cdrom_get_read_delay(psx_cdrom_t* cdrom);
+void cdrom_set_int(psx_cdrom_t* cdrom, int n);
+void cdrom_process_setloc(psx_cdrom_t* cdrom);
 
 psx_cdrom_t* psx_cdrom_create(void);
-void psx_cdrom_init(psx_cdrom_t* cdrom);
+void psx_cdrom_init(psx_cdrom_t* cdrom, void (*send_irq)(void*), void* udata);
+void psx_cdrom_reset(psx_cdrom_t* cdrom);
+void psx_cdrom_set_version(psx_cdrom_t* cdrom, int version);
+void psx_cdrom_set_region(psx_cdrom_t* cdrom, int region);
+int psx_cdrom_open(psx_cdrom_t* cdrom, const char* path);
+void psx_cdrom_close(psx_cdrom_t* cdrom);
 uint32_t psx_cdrom_read32(psx_cdrom_t* cdrom, uint32_t addr);
 uint32_t psx_cdrom_read16(psx_cdrom_t* cdrom, uint32_t addr);
 uint32_t psx_cdrom_read8(psx_cdrom_t* cdrom, uint32_t addr);
@@ -220,6 +305,7 @@ void psx_cdrom_write32(psx_cdrom_t* cdrom, uint32_t addr, uint32_t value);
 void psx_cdrom_write16(psx_cdrom_t* cdrom, uint32_t addr, uint32_t value);
 void psx_cdrom_write8(psx_cdrom_t* cdrom, uint32_t addr, uint32_t value);
 void psx_cdrom_update(psx_cdrom_t* cdrom, int cycles);
+void psx_cdrom_get_audio_samples(psx_cdrom_t* cdrom, void* buf, size_t size);
 void psx_cdrom_destroy(psx_cdrom_t* cdrom);
 
 #endif

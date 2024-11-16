@@ -85,6 +85,18 @@ node_t* list_back(list_t* list) {
     return list->last;
 }
 
+node_t* list_at(list_t* list, int index) {
+    if (index > list->size)
+        return NULL;
+
+    node_t* node = list->first;
+
+    for (int i = 0; i < index; i++)
+        node = node->next;
+
+    return node;
+}
+
 void list_iterate(list_t* list, void (*func)(void*)) {
     node_t* node = list->first;
 

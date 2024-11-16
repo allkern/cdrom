@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 #include "queue.h"
 
@@ -25,7 +26,12 @@ uint8_t queue_pop(queue_t* queue) {
     if (queue_is_empty(queue))
         return 0;
 
-    return queue->buf[queue->read_index++];
+    uint8_t data = queue->buf[queue->read_index++];
+
+    if (queue_is_empty(queue))
+        queue_reset(queue);
+
+    return data;
 }
 
 uint8_t queue_peek(queue_t* queue) {

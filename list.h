@@ -24,6 +24,7 @@ void list_pop_front(list_t* list);
 void list_pop_back(list_t* list);
 node_t* list_front(list_t* list);
 node_t* list_back(list_t* list);
+node_t* list_at(list_t* list, int index);
 void list_iterate(list_t* list, void (*func)(void*));
 void list_destroy(list_t* list);
 

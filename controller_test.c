@@ -14,11 +14,14 @@ void cdrom_write(psx_cdrom_t* cdrom, int index, int reg, uint8_t data) {
     psx_cdrom_write8(cdrom, reg, data);
 }
 
+void cdrom_irq_callback(void* udata) {
+    printf("cdrom: got irq\n");
+}
+
 int main(void) {
     psx_cdrom_t* cdrom = psx_cdrom_create();
-    psx_cdrom_init(cdrom);
-
-    cdrom->disc = cdrom;
+    psx_cdrom_init(cdrom, cdrom_irq_callback, NULL);
+    psx_cdrom_open(cdrom, "CTR - Crash Team Racing (USA).cue");
 
     // Enable all INTs (IER <- 1Fh)
     // Send CdlTest(20h)

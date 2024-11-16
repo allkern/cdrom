@@ -9,6 +9,13 @@
 #include <stdio.h>
 
 enum {
+    CUE_OK = 0,
+    CUE_FILE_NOT_FOUND,
+    CUE_TRACK_FILE_NOT_FOUND,
+    CUE_TRACK_READ_ERROR
+};
+
+enum {
     CUE_4CH = 0,
     CUE_AIFF,
     CUE_AUDIO,
@@ -60,7 +67,7 @@ typedef struct {
     int number;
     int mode;
 
-    uint32_t index[2];
+    int32_t index[2];
     uint32_t pregap;
     uint32_t start;
     uint32_t end;
@@ -79,8 +86,14 @@ typedef struct {
 cue_t* cue_create(void);
 void cue_init(cue_t* cue);
 int cue_parse(cue_t* cue, const char* path);
-void cue_load(cue_t* cue, int mode);
+int cue_load(cue_t* cue, int mode);
+
+// Disc interface
 int cue_read(cue_t* cue, uint32_t lba, void* buf);
+int cue_query(cue_t* cue, uint32_t lba);
+int cue_get_track_number(cue_t* cue, uint32_t lba);
+int cue_get_track_count(cue_t* cue);
+int cue_get_track_lba(cue_t* cue, int track);
 void cue_init_disc(cue_t* cue, psx_disc_t* disc);
 void cue_destroy(cue_t* cue);
 
